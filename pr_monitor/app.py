@@ -37,9 +37,27 @@ class PRDashboard(App):
         background: $surface;
     }
 
-    DataTable {
+    #main-container {
         height: 1fr;
+        overflow-y: auto;
+    }
+
+    .query-section {
+        margin: 1 0;
         border: solid $primary;
+        padding: 0 1;
+    }
+
+    .query-title {
+        color: $accent;
+        text-style: bold;
+        padding: 1 0;
+    }
+
+    DataTable {
+        height: auto;
+        min-height: 3;
+        border: none;
     }
 
     .title {
@@ -75,31 +93,18 @@ class PRDashboard(App):
         self.pr_urls = {}  # Maps row keys to PR URLs
         self.last_update = None
         self.usernames = {}  # Cache: token_env_var -> username
+        self.query_labels = []  # Track unique query labels for section organization
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
         yield Header()
         yield Static("🔍 Unified PR Inbox", classes="title")
         yield Static("", id="status-bar", classes="status-bar")
-        yield DataTable(id="pr-table", cursor_type="row", zebra_stripes=True)
+        yield Container(id="main-container")
         yield Footer()
 
     def on_mount(self) -> None:
         """Set up the application on mount."""
-        table = self.query_one("#pr-table", DataTable)
-
-        # Configure columns
-        table.add_columns(
-            "Status",
-            "Checks",
-            "Account",
-            "Type",
-            "Repo",
-            "Title",
-            "Author",
-            "Age",
-        )
-
         # Load config and initial data
         self.load_config()
 
@@ -526,8 +531,6 @@ class PRDashboard(App):
         if not self.config or not self.config.get("accounts"):
             return
 
-        table = self.query_one("#pr-table", DataTable)
-        table.clear()
         self.pr_urls.clear()
 
         # Update status
@@ -542,11 +545,14 @@ class PRDashboard(App):
             account_results = await self.fetch_prs(account)
             all_results.extend(account_results)
 
-        # Process PRs and collect them with priority info
-        pr_rows = []
+        # Process PRs and collect them with priority info, grouped by query label
+        pr_rows_by_query = {}  # query_label -> [row_data]
         seen_prs = set()  # Track PR IDs to avoid duplicates across queries
 
         for account_label, username, query_label, prs in all_results:
+            if query_label not in pr_rows_by_query:
+                pr_rows_by_query[query_label] = []
+
             for pr in prs:
                 pr_id = pr["id"]
 
@@ -588,11 +594,17 @@ class PRDashboard(App):
                     "pr": pr,  # Store PR object for check fetching
                     "original_query_label": query_label,  # Store for priority re-evaluation
                     "assignees": pr.get("assignees", []),  # Store for priority re-evaluation
+                    "query_label": query_label,  # Store query label for grouping
                 }
-                pr_rows.append(row_data)
+                pr_rows_by_query[query_label].append(row_data)
+
+        # Flatten all rows for check status fetching
+        all_pr_rows = []
+        for rows in pr_rows_by_query.values():
+            all_pr_rows.extend(rows)
 
         # Fetch check statuses concurrently for all PRs
-        if pr_rows:
+        if all_pr_rows:
             # Build account credentials map
             account_creds = {}
             for account in accounts:
@@ -613,7 +625,7 @@ class PRDashboard(App):
 
             # Fetch all check statuses concurrently
             async with httpx.AsyncClient(timeout=10.0) as client:
-                for row_data in pr_rows:
+                for row_data in all_pr_rows:
                     account_label = row_data["account"]
                     if account_label in account_creds:
                         creds = account_creds[account_label]
@@ -626,7 +638,7 @@ class PRDashboard(App):
                         row_data["reviewer_info"] = reviewer_info
 
         # Update priority based on reviewer info and check status
-        for row_data in pr_rows:
+        for row_data in all_pr_rows:
             username = row_data.get("account_username", "")
             author = row_data["author"]
             is_my_pr = author.lower() == username.lower() if username else False
@@ -655,27 +667,57 @@ class PRDashboard(App):
             row_data.pop("assignees", None)
             row_data.pop("original_query_label", None)
 
-        # Sort by priority (high to low), then by age (newest first)
-        pr_rows.sort(key=lambda x: (x["priority"], x["age"]))
+        # Sort PRs within each query by priority
+        for query_label in pr_rows_by_query:
+            pr_rows_by_query[query_label].sort(key=lambda x: (x["priority"], x["age"]))
 
-        # Add sorted rows to table
+        # Clear and rebuild the main container
+        main_container = self.query_one("#main-container", Container)
+        await main_container.remove_children()
+
+        # Create a section for each query label
         total_prs = 0
-        for row in pr_rows:
-            table.add_row(
-                row["status"],
-                row["checks"],
-                row["account"],
-                row["state"],
-                row["repo"],
-                row["title"],
-                row["author"],
-                row["age"],
-                key=row["key"],
+        for query_label, pr_rows in pr_rows_by_query.items():
+            if not pr_rows:
+                continue
+
+            # Create query title
+            title = Static(f"📌 {query_label} ({len(pr_rows)})", classes="query-title")
+
+            # Create table for this query
+            table = DataTable(cursor_type="row", zebra_stripes=True)
+            table.add_columns(
+                "Status",
+                "Checks",
+                "Account",
+                "Type",
+                "Repo",
+                "Title",
+                "Author",
+                "Age",
             )
 
-            # Store URL for this row
-            self.pr_urls[row["key"]] = row["url"]
-            total_prs += 1
+            # Add rows to table
+            for row in pr_rows:
+                table.add_row(
+                    row["status"],
+                    row["checks"],
+                    row["account"],
+                    row["state"],
+                    row["repo"],
+                    row["title"],
+                    row["author"],
+                    row["age"],
+                    key=row["key"],
+                )
+
+                # Store URL for this row
+                self.pr_urls[row["key"]] = row["url"]
+                total_prs += 1
+
+            # Create section and mount title and table together
+            section = Vertical(title, table, classes="query-section")
+            await main_container.mount(section)
 
         # Update status bar
         self.last_update = datetime.now()
@@ -690,7 +732,21 @@ class PRDashboard(App):
 
     def action_open_pr(self) -> None:
         """Open the selected PR in the default browser."""
-        table = self.query_one("#pr-table", DataTable)
+        # Find the focused DataTable widget
+        focused = self.focused
+        if not isinstance(focused, DataTable):
+            # Try to find any DataTable with a cursor
+            tables = self.query(DataTable)
+            for table in tables:
+                if table.cursor_row is not None:
+                    focused = table
+                    break
+
+        if not isinstance(focused, DataTable):
+            self.notify("No PR selected", severity="warning")
+            return
+
+        table = focused
 
         if table.cursor_row is None:
             self.notify("No PR selected", severity="warning")
