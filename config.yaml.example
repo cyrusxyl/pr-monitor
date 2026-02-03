@@ -1,0 +1,119 @@
+# GitHub PR Monitor Configuration
+# Copy this file to config.yaml and fill in your details
+
+general:
+  # How often to refresh PR data (in seconds)
+  # Default: 300 (5 minutes)
+  refresh_interval_seconds: 300
+
+  # Theme for the TUI (optional)
+  # Available themes: https://textual.textualize.io/guide/design/#themes
+  theme: "monokai"
+
+accounts:
+  # Example 1: Public GitHub Account with default query
+  - id: "personal"
+    label: "GitHub Public"
+    # Public GitHub API base URL (don't change this for github.com)
+    api_base: "https://api.github.com"
+    # Environment variable name that contains your Personal Access Token
+    # Set this in your environment: export GH_PUBLIC_TOKEN="ghp_xxxx..."
+    token_env_var: "GH_PUBLIC_TOKEN"
+    filters:
+      # "all" - tracks all repos you have access to
+      # "specific" - only tracks repos listed below
+      scope: "all"
+      # Only used when scope is "specific"
+      repos: []
+      # Custom queries (optional) - if not specified, defaults to review-requested PRs
+      # queries:
+      #   - label: "Review Requested"
+      #     query: "is:pr is:open review-requested:@me"
+
+  # Example 2: GitHub Enterprise with multiple query types
+  - id: "work"
+    label: "Work"
+    # For GitHub Enterprise, use your company domain with /api/v3 at the end
+    # Example: https://github.company.com/api/v3
+    api_base: "https://github.your-company.com/api/v3"
+    # Environment variable for your work token
+    # Set this in your environment: export GH_WORK_TOKEN="ghp_yyyy..."
+    token_env_var: "GH_WORK_TOKEN"
+    filters:
+      # Track only specific repositories
+      scope: "specific"
+      repos:
+        - "organization/repo-name-1"
+        - "organization/repo-name-2"
+        - "organization/repo-name-3"
+      # Multiple queries to track different PR types
+      queries:
+        # PRs where you're requested as a reviewer
+        - label: "Review Requested"
+          query: "is:pr is:open review-requested:@me"
+        # PRs you created that are waiting for review
+        - label: "My PRs"
+          query: "is:pr is:open author:@me"
+        # PRs you created that have changes requested
+        - label: "Changes Requested"
+          query: "is:pr is:open author:@me review:changes-requested"
+
+  # Example 3: Monitor PRs for a specific user (e.g., your team lead)
+  # - id: "team-lead-prs"
+  #   label: "Team Lead"
+  #   api_base: "https://api.github.com"
+  #   token_env_var: "GH_PUBLIC_TOKEN"
+  #   filters:
+  #     scope: "all"
+  #     queries:
+  #       - label: "Lead's PRs"
+  #         query: "is:pr is:open author:username"
+
+  # Example 4: Advanced - Monitor team PRs in specific repos
+  # - id: "team-monitor"
+  #   label: "Team"
+  #   api_base: "https://github.company.com/api/v3"
+  #   token_env_var: "GH_WORK_TOKEN"
+  #   filters:
+  #     scope: "specific"
+  #     repos:
+  #       - "org/critical-service"
+  #     queries:
+  #       # PRs from your team members
+  #       - label: "Team PRs"
+  #         query: "is:pr is:open author:teammate1 author:teammate2"
+  #       # High-priority PRs with specific labels
+  #       - label: "Urgent"
+  #         query: "is:pr is:open label:urgent label:high-priority"
+  #       # PRs that need attention (no reviews yet)
+  #       - label: "Needs Review"
+  #         query: "is:pr is:open review:none"
+
+# Additional Query Examples:
+# ==========================
+#
+# Common query patterns you can use:
+#
+# 1. PRs assigned to you:
+#    query: "is:pr is:open assignee:@me"
+#
+# 2. PRs you're mentioned in:
+#    query: "is:pr is:open mentions:@me"
+#
+# 3. PRs with specific labels:
+#    query: "is:pr is:open label:bug label:critical"
+#
+# 4. Draft PRs you created:
+#    query: "is:pr is:open is:draft author:@me"
+#
+# 5. PRs approved but not merged:
+#    query: "is:pr is:open review:approved -is:merged"
+#
+# 6. PRs created in the last week:
+#    query: "is:pr is:open created:>2024-01-01"
+#
+# 7. Combine multiple conditions with OR:
+#    query: "is:pr is:open (review-requested:@me OR assignee:@me)"
+#
+# For complete GitHub search syntax, see:
+# https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests
