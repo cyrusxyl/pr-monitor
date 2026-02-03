@@ -214,9 +214,9 @@ class PRDashboard(App):
         pr: dict[str, Any],
         headers: dict[str, str],
         client: httpx.AsyncClient
-    ) -> str:
+    ) -> tuple[str, dict[str, Any]]:
         """
-        Get the combined check status for a PR.
+        Get the combined check status for a PR and reviewer information.
 
         Args:
             pr: PR data from GitHub Search API (simplified object)
@@ -224,31 +224,47 @@ class PRDashboard(App):
             client: HTTP client to use
 
         Returns:
-            Status string with emoji indicator
+            Tuple of (status_emoji, reviewer_info_dict)
+            reviewer_info_dict contains:
+                - requested_reviewers: list of individual reviewer logins
+                - requested_teams: list of team slugs
         """
+        reviewer_info = {
+            "requested_reviewers": [],
+            "requested_teams": []
+        }
+
         try:
             # Search API returns simplified objects - need to fetch full PR details
             # to get the commit SHA for checking status
             pull_request_url = pr.get("pull_request", {}).get("url")
             if not pull_request_url:
-                return "⚪"  # Not a PR or URL not available
+                return "⚪", reviewer_info  # Not a PR or URL not available
 
             # Fetch the full PR object
             response = await client.get(pull_request_url, headers=headers)
             if response.status_code != 200:
-                return "⚪"
+                return "⚪", reviewer_info
 
             full_pr = response.json()
+
+            # Extract reviewer information
+            reviewer_info["requested_reviewers"] = [
+                reviewer.get("login") for reviewer in full_pr.get("requested_reviewers", [])
+            ]
+            reviewer_info["requested_teams"] = [
+                team.get("slug") for team in full_pr.get("requested_teams", [])
+            ]
 
             # Get the head commit SHA
             sha = full_pr.get("head", {}).get("sha")
             if not sha:
-                return "⚪"
+                return "⚪", reviewer_info
 
             # Get repository info
             repo_url = pr.get("repository_url")
             if not repo_url:
-                return "⚪"
+                return "⚪", reviewer_info
 
             # Use the Check Runs API (newer, more reliable)
             check_runs_url = f"{repo_url}/commits/{sha}/check-runs"
@@ -277,9 +293,9 @@ class PRDashboard(App):
                             "failure": "❌",
                             "error": "❌",
                         }
-                        return status_map.get(state, "⚪")
+                        return status_map.get(state, "⚪"), reviewer_info
 
-                    return "⚪"  # No checks at all
+                    return "⚪", reviewer_info  # No checks at all
 
                 # Process check runs
                 conclusions = [run.get("conclusion") for run in check_runs]
@@ -287,23 +303,23 @@ class PRDashboard(App):
 
                 # If any are in progress or queued
                 if "in_progress" in statuses or "queued" in statuses:
-                    return "🟡"
+                    return "🟡", reviewer_info
 
                 # If any failed
                 if "failure" in conclusions or "timed_out" in conclusions or "action_required" in conclusions:
-                    return "❌"
+                    return "❌", reviewer_info
 
                 # If all succeeded
                 if all(c == "success" for c in conclusions if c):
-                    return "✅"
+                    return "✅", reviewer_info
 
                 # Neutral or skipped
-                return "⚪"
+                return "⚪", reviewer_info
 
         except Exception:
             pass
 
-        return "⚪"  # Default: no status or error
+        return "⚪", reviewer_info  # Default: no status or error
 
     async def fetch_prs(self, account: dict) -> list[tuple[str, str, str, list[dict[str, Any]]]]:
         """
@@ -429,7 +445,13 @@ class PRDashboard(App):
         except Exception:
             return repo_url
 
-    def determine_pr_status(self, pr: dict[str, Any], query_label: str, username: str) -> tuple[Priority, str]:
+    def determine_pr_status(
+        self,
+        pr: dict[str, Any],
+        query_label: str,
+        username: str,
+        reviewer_info: dict[str, Any] | None = None
+    ) -> tuple[Priority, str]:
         """
         Determine the priority and status of a PR.
 
@@ -437,6 +459,7 @@ class PRDashboard(App):
             pr: PR data from GitHub API
             query_label: The query label that found this PR
             username: Current user's GitHub username
+            reviewer_info: Optional dict with 'requested_reviewers' and 'requested_teams' lists
 
         Returns:
             Tuple of (Priority, status_string)
@@ -444,23 +467,42 @@ class PRDashboard(App):
         author = pr.get("user", {}).get("login", "")
         is_my_pr = author.lower() == username.lower() if username else False
 
-        # Check for review requests (requested_reviewers is available in search results)
-        # The query itself tells us if review was requested
-        is_review_requested = "review-requested:@me" in query_label.lower() or "review requested" in query_label.lower()
-
         # Check for assignment
         assignees = pr.get("assignees", [])
         is_assigned = any(a.get("login", "").lower() == username.lower() for a in assignees) if username else False
 
+        # Check if this is a review request query
+        is_review_request_query = "review-requested:@me" in query_label.lower() or "review requested" in query_label.lower()
+
+        # Differentiate between individual and team review requests
+        is_individual_review_request = False
+        is_team_review_request = False
+
+        if is_review_request_query and reviewer_info:
+            # Check if user is individually requested
+            requested_reviewers = reviewer_info.get("requested_reviewers", [])
+            is_individual_review_request = username in requested_reviewers if username else False
+
+            # Check if there are team requests (and user wasn't individually requested)
+            requested_teams = reviewer_info.get("requested_teams", [])
+            is_team_review_request = bool(requested_teams) and not is_individual_review_request
+        elif is_review_request_query:
+            # Fallback if reviewer_info not available (shouldn't happen normally)
+            is_individual_review_request = True
+
         # Priority logic:
-        # HIGH: Review requested from you, or assigned to you (you're blocking others)
-        if is_review_requested or is_assigned:
-            if is_assigned and is_review_requested:
+        # HIGH: Individually requested for review, or assigned to you (you're blocking others)
+        if is_individual_review_request or is_assigned:
+            if is_assigned and is_individual_review_request:
                 return Priority.HIGH, "🔴 Action Needed"
-            elif is_review_requested:
+            elif is_individual_review_request:
                 return Priority.HIGH, "🔴 Review"
             else:
                 return Priority.HIGH, "🔴 Assigned"
+
+        # MEDIUM: Team review request (not individually requested)
+        if is_team_review_request:
+            return Priority.MEDIUM, "🟡 Team Review"
 
         # MEDIUM: Your PR with changes requested or needs attention
         if is_my_pr:
@@ -544,6 +586,8 @@ class PRDashboard(App):
                     "key": row_key,
                     "checks": "⚪",  # Default, will be updated
                     "pr": pr,  # Store PR object for check fetching
+                    "original_query_label": query_label,  # Store for priority re-evaluation
+                    "assignees": pr.get("assignees", []),  # Store for priority re-evaluation
                 }
                 pr_rows.append(row_data)
 
@@ -573,18 +617,31 @@ class PRDashboard(App):
                     account_label = row_data["account"]
                     if account_label in account_creds:
                         creds = account_creds[account_label]
-                        check_status = await self.get_check_status(
+                        check_status, reviewer_info = await self.get_check_status(
                             row_data["pr"],
                             creds["headers"],
                             client
                         )
                         row_data["checks"] = check_status
+                        row_data["reviewer_info"] = reviewer_info
 
-        # Update priority based on check status (failing checks need attention!)
+        # Update priority based on reviewer info and check status
         for row_data in pr_rows:
             username = row_data.get("account_username", "")
             author = row_data["author"]
             is_my_pr = author.lower() == username.lower() if username else False
+
+            # Re-determine priority with reviewer info (if available)
+            if "reviewer_info" in row_data:
+                # Re-evaluate priority with full reviewer information
+                priority, status = self.determine_pr_status(
+                    {"user": {"login": author}, "assignees": row_data.get("assignees", [])},
+                    row_data.get("original_query_label", ""),
+                    username,
+                    row_data["reviewer_info"]
+                )
+                row_data["priority"] = priority
+                row_data["status"] = status
 
             # If it's your PR and checks are failing, elevate to HIGH priority
             if is_my_pr and row_data["checks"] == "❌":
@@ -594,6 +651,9 @@ class PRDashboard(App):
             # Clean up temporary fields
             row_data.pop("pr", None)
             row_data.pop("account_username", None)
+            row_data.pop("reviewer_info", None)
+            row_data.pop("assignees", None)
+            row_data.pop("original_query_label", None)
 
         # Sort by priority (high to low), then by age (newest first)
         pr_rows.sort(key=lambda x: (x["priority"], x["age"]))
