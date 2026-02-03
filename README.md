@@ -99,6 +99,13 @@ You need a Personal Access Token for each GitHub account you want to monitor.
 
 **Token Format**: Tokens start with `ghp_` followed by alphanumeric characters (e.g., `ghp_abc123def456...`)
 
+**Important for Organization Repositories**: If your repositories belong to an organization that uses SAML Single Sign-On (SSO), you'll need to authorize your token for that organization after creating it:
+1. After generating the token, click **"Configure SSO"** next to it
+2. Find your organization in the list and click **"Authorize"**
+3. Complete the SAML authentication if prompted
+
+Without SAML authorization, you'll see HTTP 403 errors when trying to access organization repositories.
+
 ### Step 4: Set up environment variables
 
 Add your tokens to your shell environment. Choose one of the following methods:
@@ -322,6 +329,18 @@ The status bar at the bottom shows:
 - Make sure you're using a "classic" token, not a fine-grained token
 
 ### "API error: HTTP 403"
+
+**If the error mentions "organization SAML enforcement":**
+- Your Personal Access Token needs to be authorized for the organization's SAML SSO
+- To fix:
+  1. Go to [https://github.com/settings/tokens](https://github.com/settings/tokens) (or your GitHub Enterprise equivalent)
+  2. Find the token you're using
+  3. Click **"Configure SSO"** next to the token
+  4. Click **"Authorize"** next to the organization
+  5. Complete the SAML authentication flow if prompted
+- Note: SAML SSO authorization is separate from token creation and must be done after creating the token
+
+**If the error mentions rate limiting:**
 - You've hit the rate limit (60 requests/hour for unauthenticated, 5000/hour for authenticated)
 - Wait an hour or check your rate limit status:
   ```bash

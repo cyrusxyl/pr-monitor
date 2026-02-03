@@ -360,10 +360,16 @@ class PRDashboard(App):
                             prs = data.get("items", [])
                             results.append((account_label, username, query_label, prs))
                         else:
-                            self.notify(
-                                f"API error for {account_label} ({query_label}): HTTP {response.status_code}",
-                                severity="error"
-                            )
+                            error_msg = f"API error for {account_label} ({query_label}): HTTP {response.status_code}"
+                            try:
+                                error_data = response.json()
+                                if "message" in error_data:
+                                    error_msg += f" - {error_data['message']}"
+                                if "errors" in error_data:
+                                    error_msg += f" - Errors: {error_data['errors']}"
+                            except Exception:
+                                pass
+                            self.notify(error_msg, severity="error")
                             results.append((account_label, username, query_label, []))
 
                     except Exception as e:
