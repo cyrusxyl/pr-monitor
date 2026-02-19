@@ -119,11 +119,12 @@ class PRDashboard(App):
         self.set_interval(refresh_interval, self.refresh_data)
 
     def load_config(self) -> None:
-        """Load configuration from config.yaml."""
-        config_path = Path("config.yaml")
+        """Load configuration from ~/.config/pr-monitor/config.yaml."""
+        xdg_config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        config_path = xdg_config_home / "pr-monitor" / "config.yaml"
 
         if not config_path.exists():
-            self.show_error("config.yaml not found! Please create it from config.yaml.example")
+            self.show_error(f"config.yaml not found! Please create it at {config_path}")
             self.config = {"accounts": []}
             return
 
@@ -765,8 +766,13 @@ class PRDashboard(App):
                 pr_url = self.pr_urls.get(actual_key)
 
                 if pr_url:
+                    # Works in VSCode Remote SSH (intercepted) and native Linux with display.
+                    # Silently fails in plain SSH terminals — the link below handles that case.
                     webbrowser.open(pr_url)
-                    self.notify(f"Opening: {pr_url}")
+                    # Emit URL as a terminal hyperlink (OSC 8) so iTerm2/tmux users
+                    # can CMD+click it to open in their local browser.
+                    # URL must be quoted in Textual markup or the parser trips on '://'.
+                    self.notify(f'[link="{pr_url}"]{pr_url}[/link]', timeout=10)
                 else:
                     self.notify("URL not found for selected PR", severity="error")
         except Exception as e:
