@@ -7,7 +7,7 @@ A TUI application for monitoring pull requests across multiple GitHub accounts.
 import asyncio
 import os
 import webbrowser
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import IntEnum
 from pathlib import Path
 from typing import Any
@@ -126,62 +126,56 @@ class PRDashboard(App):
 
         if not config_path.exists():
             self.show_error(f"config.yaml not found! Please create it at {config_path}")
-            self.config = {"accounts": []}
+            self.config = {"accounts": [], "boxes": []}
             return
 
         try:
             with open(config_path, "r") as f:
                 self.config = yaml.safe_load(f)
+            if "boxes" not in self.config:
+                self.config["boxes"] = []
         except Exception as e:
             self.show_error(f"Error loading config.yaml: {e}")
-            self.config = {"accounts": []}
+            self.config = {"accounts": [], "boxes": []}
 
     def show_error(self, message: str) -> None:
         """Display an error message."""
         self.notify(message, severity="error", timeout=10)
 
-    def build_queries(self, account_config: dict) -> list[tuple[str, str]]:
+    def build_query_for_box(self, box: dict, account: dict) -> str:
         """
-        Construct GitHub Search API queries based on account configuration.
+        Construct a GitHub Search API query string for a box + account combination.
 
         Args:
-            account_config: Account configuration dictionary
+            box: Box configuration dictionary
+            account: Account configuration dictionary
 
         Returns:
-            List of tuples: [(query_label, query_string), ...]
+            Query string ready to pass to the search API
         """
-        queries = []
+        parts = box["query"].split()
 
-        # Get filter configuration
-        filters = account_config.get("filters", {})
-        scope = filters.get("scope", "all")
+        for repo in account.get("repos", []):
+            parts.append(f"repo:{repo}")
 
-        # Get custom queries or use default
-        query_configs = filters.get("queries", [
-            {
-                "label": "Review Requested",
-                "query": "is:pr is:open review-requested:@me"
-            }
-        ])
+        days = box.get("closed_since_days")
+        if days:
+            cutoff = date.today() - timedelta(days=int(days))
+            parts.append(f"closed:>{cutoff}")
 
-        # Build each query
-        for query_config in query_configs:
-            label = query_config.get("label", "PRs")
-            base_query = query_config.get("query", "is:pr is:open")
+        return " ".join(parts)
 
-            # Parse the query into parts
-            parts = base_query.split()
+    def _resolve_box_accounts(self, box: dict, accounts_by_id: dict) -> list[dict]:
+        """
+        Return the list of accounts that should be queried for a given box.
 
-            # Add repository filters if scope is "specific"
-            if scope == "specific":
-                repos = filters.get("repos", [])
-                if repos:
-                    for repo in repos:
-                        parts.append(f"repo:{repo}")
-
-            queries.append((label, " ".join(parts)))
-
-        return queries
+        If box["accounts"] is absent or empty, returns all accounts.
+        Otherwise, filters to the listed account IDs.
+        """
+        box_account_ids = box.get("accounts")
+        if not box_account_ids:
+            return list(accounts_by_id.values())
+        return [accounts_by_id[aid] for aid in box_account_ids if aid in accounts_by_id]
 
     async def get_authenticated_user(self, api_base: str, token: str, token_env_var: str) -> str:
         """
@@ -328,24 +322,24 @@ class PRDashboard(App):
 
         return "⚪", reviewer_info  # Default: no status or error
 
-    async def fetch_prs(self, account: dict) -> list[tuple[str, str, str, list[dict[str, Any]]]]:
+    async def fetch_prs(self, box: dict, account: dict) -> tuple[str, str, str, list[dict[str, Any]]]:
         """
-        Fetch PRs for a single account across all configured queries.
+        Fetch PRs for a single box + account combination.
 
         Args:
+            box: Box configuration dictionary
             account: Account configuration dictionary
 
         Returns:
-            List of tuples: [(account_label, username, query_label, list_of_prs), ...]
+            Tuple: (account_label, username, box_label, list_of_prs)
         """
         account_label = account.get("label", account.get("id", "Unknown"))
-        results = []
+        box_label = box.get("label", "PRs")
 
-        # Get token from environment variable
         token_env_var = account.get("token_env_var")
         if not token_env_var:
             self.notify(f"No token_env_var configured for {account_label}", severity="warning")
-            return results
+            return (account_label, "", box_label, [])
 
         token = os.getenv(token_env_var)
         if not token:
@@ -353,58 +347,47 @@ class PRDashboard(App):
                 f"Token not found in environment variable {token_env_var} for {account_label}",
                 severity="warning"
             )
-            return results
+            return (account_label, "", box_label, [])
 
-        # Build all queries for this account
-        queries = self.build_queries(account)
         api_base = account.get("api_base", "https://api.github.com")
-
-        # Get authenticated username
         username = await self.get_authenticated_user(api_base, token, token_env_var)
 
-        # Prepare request headers
         headers = {
             "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3+json",
         }
 
-        # Fetch PRs for all queries concurrently
+        query_string = self.build_query_for_box(box, account)
+
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                async def _fetch_one_query(query_label, query_string):
-                    url = f"{api_base}/search/issues"
-                    params = {"q": query_string, "per_page": 100}
-                    try:
-                        response = await client.get(url, headers=headers, params=params)
-                        if response.status_code == 200:
-                            return (account_label, username, query_label, response.json().get("items", []))
-                        else:
-                            error_msg = f"API error for {account_label} ({query_label}): HTTP {response.status_code}"
-                            try:
-                                error_data = response.json()
-                                if "message" in error_data:
-                                    error_msg += f" - {error_data['message']}"
-                                if "errors" in error_data:
-                                    error_msg += f" - Errors: {error_data['errors']}"
-                            except Exception:
-                                pass
-                            self.notify(error_msg, severity="error")
-                            return (account_label, username, query_label, [])
-                    except Exception as e:
-                        self.notify(
-                            f"Error fetching {query_label} for {account_label}: {str(e)}",
-                            severity="error"
-                        )
-                        return (account_label, username, query_label, [])
-
-                results = list(await asyncio.gather(
-                    *[_fetch_one_query(ql, qs) for ql, qs in queries]
-                ))
-
+                url = f"{api_base}/search/issues"
+                params = {"q": query_string, "per_page": 100}
+                try:
+                    response = await client.get(url, headers=headers, params=params)
+                    if response.status_code == 200:
+                        return (account_label, username, box_label, response.json().get("items", []))
+                    else:
+                        error_msg = f"API error for {account_label} ({box_label}): HTTP {response.status_code}"
+                        try:
+                            error_data = response.json()
+                            if "message" in error_data:
+                                error_msg += f" - {error_data['message']}"
+                            if "errors" in error_data:
+                                error_msg += f" - Errors: {error_data['errors']}"
+                        except Exception:
+                            pass
+                        self.notify(error_msg, severity="error")
+                        return (account_label, username, box_label, [])
+                except Exception as e:
+                    self.notify(
+                        f"Error fetching {box_label} for {account_label}: {str(e)}",
+                        severity="error"
+                    )
+                    return (account_label, username, box_label, [])
         except Exception as e:
             self.notify(f"Network error for {account_label}: {str(e)}", severity="error")
-
-        return results
+            return (account_label, username, box_label, [])
 
     def calculate_age(self, created_at: str) -> str:
         """
@@ -470,6 +453,11 @@ class PRDashboard(App):
         Returns:
             Tuple of (Priority, status_string)
         """
+        if pr.get("state") == "closed":
+            if pr.get("pull_request", {}).get("merged_at"):
+                return Priority.LOW, "🟣 Merged"
+            return Priority.LOW, "⚫ Closed"
+
         author = pr.get("user", {}).get("login", "")
         is_my_pr = author.lower() == username.lower() if username else False
 
@@ -528,78 +516,84 @@ class PRDashboard(App):
         return Priority.LOW, "⚪ Watching"
 
     async def refresh_data(self) -> None:
-        """Fetch PRs from all configured accounts and update the table."""
-        if not self.config or not self.config.get("accounts"):
+        """Fetch PRs from all configured boxes/accounts and update the table."""
+        if not self.config or not self.config.get("boxes"):
             return
 
         self.pr_urls.clear()
 
-        # Update status
         status_bar = self.query_one("#status-bar", Static)
         status_bar.update("🔄 Fetching PRs...")
 
+        boxes = self.config.get("boxes", [])
         accounts = self.config.get("accounts", [])
+        accounts_by_id = {a["id"]: a for a in accounts}
 
-        # Fetch PRs from all accounts in parallel
-        account_result_lists = await asyncio.gather(
-            *[self.fetch_prs(account) for account in accounts],
+        # Build (box, account) pairs and fetch all in parallel
+        fetch_pairs = [
+            (box, account)
+            for box in boxes
+            for account in self._resolve_box_accounts(box, accounts_by_id)
+        ]
+        raw_results = await asyncio.gather(
+            *[self.fetch_prs(box, acct) for box, acct in fetch_pairs],
             return_exceptions=True,
         )
-        all_results = []
-        for res in account_result_lists:
-            if not isinstance(res, Exception):
-                all_results.extend(res)
 
-        # Process PRs and collect them with priority info, grouped by query label
-        pr_rows_by_query = {}  # query_label -> [row_data]
-        seen_prs = set()  # Track PR IDs to avoid duplicates across queries
+        # Process PRs grouped by box label (preserving box order)
+        pr_rows_by_query: dict[str, list] = {box["label"]: [] for box in boxes}
+        seen_prs_by_box: dict[str, set] = {box["label"]: set() for box in boxes}
 
-        for account_label, username, query_label, prs in all_results:
+        for result in raw_results:
+            if isinstance(result, Exception):
+                continue
+            account_label, username, query_label, prs = result
             if query_label not in pr_rows_by_query:
-                pr_rows_by_query[query_label] = []
+                continue
 
             for pr in prs:
                 pr_id = pr["id"]
 
-                # Skip if we've already added this PR (can happen with overlapping queries)
-                if pr_id in seen_prs:
+                # Skip duplicates within the same box (e.g., same PR from two accounts)
+                if pr_id in seen_prs_by_box[query_label]:
                     continue
-                seen_prs.add(pr_id)
+                seen_prs_by_box[query_label].add(pr_id)
 
-                # Determine priority and status
-                priority, status = self.determine_pr_status(pr, query_label, username)
+                # Detect closed PR and short-circuit status determination
+                is_closed = pr.get("state") == "closed"
+                if is_closed:
+                    merged_at = pr.get("pull_request", {}).get("merged_at")
+                    status = "🟣 Merged" if merged_at else "⚫ Closed"
+                    priority = Priority.LOW
+                    checks_placeholder = "—"
+                else:
+                    priority, status = self.determine_pr_status(pr, query_label, username)
+                    checks_placeholder = "⚪"
 
-                # Determine state - use query label, with draft override
                 state = query_label
-                if pr.get("draft", False):
+                if not is_closed and pr.get("draft", False):
                     state = f"{query_label} (Draft)"
 
-                # Extract data
                 repo_name = self.extract_repo_name(pr["repository_url"])
-                title = pr["title"]
-                author = pr["user"]["login"]
-                age = self.calculate_age(pr["created_at"])
-                pr_url = pr["html_url"]
-
-                # Collect row data with priority for sorting
                 row_key = f"{account_label}_{pr_id}"
                 row_data = {
                     "priority": priority,
                     "status": status,
                     "account": account_label,
-                    "account_username": username,  # Store for check fetching
+                    "account_username": username,
                     "state": state,
                     "repo": repo_name,
-                    "title": title,
-                    "author": author,
-                    "age": age,
-                    "url": pr_url,
+                    "title": pr["title"],
+                    "author": pr["user"]["login"],
+                    "age": self.calculate_age(pr["created_at"]),
+                    "url": pr["html_url"],
                     "key": row_key,
-                    "checks": "⚪",  # Default, will be updated in phase 2
-                    "pr": pr,  # Store PR object for check fetching
-                    "original_query_label": query_label,  # Store for priority re-evaluation
-                    "assignees": pr.get("assignees", []),  # Store for priority re-evaluation
-                    "query_label": query_label,  # Store query label for grouping
+                    "checks": checks_placeholder,
+                    "pr": pr,
+                    "original_query_label": query_label,
+                    "assignees": pr.get("assignees", []),
+                    "query_label": query_label,
+                    "is_closed": is_closed,
                 }
                 pr_rows_by_query[query_label].append(row_data)
 
@@ -608,17 +602,16 @@ class PRDashboard(App):
         for rows in pr_rows_by_query.values():
             all_pr_rows.extend(rows)
 
-        # Sort PRs within each query by initial priority (before check statuses)
+        # Sort each box's rows by priority then age
         for query_label in pr_rows_by_query:
             pr_rows_by_query[query_label].sort(key=lambda x: (x["priority"], x["age"]))
 
-        # --- Phase 1: Build and mount table immediately with placeholder checks ---
+        # --- Phase 1: Build and mount tables immediately ---
         main_container = self.query_one("#main-container", Container)
         await main_container.remove_children()
 
-        # Maps for live cell updates in phase 2
         row_to_table: dict[str, DataTable] = {}
-        row_col_keys: dict[str, tuple] = {}  # row_key -> (checks_col_key, status_col_key)
+        row_col_keys: dict[str, tuple] = {}
 
         total_prs = 0
         for query_label, pr_rows in pr_rows_by_query.items():
@@ -644,7 +637,7 @@ class PRDashboard(App):
             for row in pr_rows:
                 table.add_row(
                     row["status"],
-                    row["checks"],  # "⚪" placeholder
+                    row["checks"],
                     row["account"],
                     row["state"],
                     row["repo"],
@@ -661,12 +654,10 @@ class PRDashboard(App):
             section = Vertical(title, table, classes="query-section")
             await main_container.mount(section)
 
-        # Show PRs immediately; indicate checks are still loading
         status_bar.update(f"📊 {total_prs} PRs | 🔄 Loading checks...")
 
-        # --- Phase 2: Fetch all check statuses in parallel, update cells live ---
+        # --- Phase 2: Fetch check statuses in parallel (skip closed PRs) ---
         if all_pr_rows:
-            # Build account credentials map
             account_creds = {}
             for account in accounts:
                 account_label = account.get("label", account.get("id", "Unknown"))
@@ -676,8 +667,6 @@ class PRDashboard(App):
                     if token:
                         api_base = account.get("api_base", "https://api.github.com")
                         account_creds[account_label] = {
-                            "token": token,
-                            "api_base": api_base,
                             "headers": {
                                 "Authorization": f"token {token}",
                                 "Accept": "application/vnd.github.v3+json",
@@ -686,6 +675,8 @@ class PRDashboard(App):
 
             async with httpx.AsyncClient(timeout=10.0) as client:
                 async def _fetch_check(row_data):
+                    if row_data.get("is_closed"):
+                        return row_data, None, None
                     acct_label = row_data["account"]
                     if acct_label not in account_creds:
                         return row_data, None, None
@@ -700,7 +691,6 @@ class PRDashboard(App):
                     return_exceptions=True,
                 )
 
-            # Apply check results and update cells
             for result in check_results:
                 if isinstance(result, Exception):
                     continue
@@ -716,13 +706,22 @@ class PRDashboard(App):
 
         # Update priority based on reviewer info and check status; patch status cells
         for row_data in all_pr_rows:
+            # Skip closed PRs entirely — status is already final
+            if row_data.get("is_closed"):
+                row_data.pop("is_closed", None)
+                row_data.pop("pr", None)
+                row_data.pop("account_username", None)
+                row_data.pop("reviewer_info", None)
+                row_data.pop("assignees", None)
+                row_data.pop("original_query_label", None)
+                continue
+
             username = row_data.get("account_username", "")
             author = row_data["author"]
             is_my_pr = author.lower() == username.lower() if username else False
 
             old_status = row_data["status"]
 
-            # Re-determine priority with reviewer info (if available)
             if "reviewer_info" in row_data:
                 priority, status = self.determine_pr_status(
                     {"user": {"login": author}, "assignees": row_data.get("assignees", [])},
@@ -733,26 +732,23 @@ class PRDashboard(App):
                 row_data["priority"] = priority
                 row_data["status"] = status
 
-            # If it's your PR and checks are failing, elevate to HIGH priority
             if is_my_pr and row_data["checks"] == "❌":
                 row_data["priority"] = Priority.HIGH
                 row_data["status"] = "🔴 Checks Failing"
 
-            # Update status cell if it changed
             if row_data["status"] != old_status:
                 key = row_data["key"]
                 if key in row_to_table:
                     _, status_col = row_col_keys[key]
                     row_to_table[key].update_cell(key, status_col, row_data["status"])
 
-            # Clean up temporary fields
             row_data.pop("pr", None)
             row_data.pop("account_username", None)
             row_data.pop("reviewer_info", None)
             row_data.pop("assignees", None)
             row_data.pop("original_query_label", None)
+            row_data.pop("is_closed", None)
 
-        # Update final status bar
         self.last_update = datetime.now()
         status_text = f"📊 {total_prs} PRs | Last updated: {self.last_update.strftime('%H:%M:%S')}"
         status_bar.update(status_text)
