@@ -9,7 +9,8 @@ A unified Terminal User Interface (TUI) dashboard for monitoring Pull Requests a
 - 🎨 **Configurable Queries**: Customize what PRs to track - reviews, your PRs, assignments, mentions, and more
 - 📊 **Smart Prioritization**: Automatically sorts PRs by priority - see what needs your attention first
 - ✅ **CI/CD Status**: See at a glance which PRs have passing, failing, or pending checks
-- ⚡ **Real-time Updates**: Auto-refresh with configurable intervals (default: 5 minutes), fetches data on launch
+- ⚡ **Fast Parallel Loading**: All accounts and queries fetched concurrently — PRs appear in the table within ~2 seconds while CI/CD check statuses stream in progressively
+- 🔄 **Real-time Updates**: Auto-refresh with configurable intervals (default: 5 minutes), fetches data on launch
 - 🖥️ **Terminal Native**: Fast, keyboard-driven workflow that lives in your terminal
 - 🔗 **Quick Access**: Open PRs directly in your browser with a single keystroke
 - 🔒 **Secure**: Uses environment variables for token storage
@@ -18,26 +19,42 @@ A unified Terminal User Interface (TUI) dashboard for monitoring Pull Requests a
 
 This project uses [uv](https://github.com/astral-sh/uv) for dependency management.
 
-### 1. Install uv (if not already installed)
+### Install uv (if not already installed)
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### 2. Clone the repository
+### Option A: Install as a global tool (recommended)
+
+Install directly from the cloned repo so `pr-monitor` is available everywhere without activating a virtualenv:
 
 ```bash
 git clone <repository-url>
 cd pr-monitor
+uv tool install .
 ```
 
-### 3. Install dependencies
+After this, run from anywhere:
 
 ```bash
-uv sync
+pr-monitor
 ```
 
-This will create a virtual environment and install all required dependencies.
+To upgrade after pulling new changes:
+
+```bash
+uv tool install . --reinstall
+```
+
+### Option B: Run from the repo with uv
+
+```bash
+git clone <repository-url>
+cd pr-monitor
+uv sync
+uv run pr-monitor
+```
 
 ## Configuration
 
@@ -251,14 +268,14 @@ For complete GitHub search syntax, see: [GitHub Search Documentation](https://do
 
 ### Run the dashboard
 
+If installed as a global tool:
 ```bash
-uv run pr-monitor
+pr-monitor
 ```
 
-Or activate the virtual environment first:
+If running from the repo:
 ```bash
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-pr-monitor
+uv run pr-monitor
 ```
 
 ### Keyboard Shortcuts
@@ -401,6 +418,8 @@ See [Step 6: Configure custom queries](#step-6-configure-custom-queries-optional
 ### Running in development mode
 
 ```bash
+uv run pr-monitor
+# or
 uv run python -m pr_monitor.app
 ```
 
