@@ -4,6 +4,7 @@ Unified GitHub PR Dashboard
 A TUI application for monitoring pull requests across multiple GitHub accounts.
 """
 
+import asyncio
 import os
 import webbrowser
 from datetime import datetime, timezone
@@ -367,20 +368,16 @@ class PRDashboard(App):
             "Accept": "application/vnd.github.v3+json",
         }
 
-        # Fetch PRs for each query
+        # Fetch PRs for all queries concurrently
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                for query_label, query_string in queries:
+                async def _fetch_one_query(query_label, query_string):
                     url = f"{api_base}/search/issues"
                     params = {"q": query_string, "per_page": 100}
-
                     try:
                         response = await client.get(url, headers=headers, params=params)
-
                         if response.status_code == 200:
-                            data = response.json()
-                            prs = data.get("items", [])
-                            results.append((account_label, username, query_label, prs))
+                            return (account_label, username, query_label, response.json().get("items", []))
                         else:
                             error_msg = f"API error for {account_label} ({query_label}): HTTP {response.status_code}"
                             try:
@@ -392,14 +389,17 @@ class PRDashboard(App):
                             except Exception:
                                 pass
                             self.notify(error_msg, severity="error")
-                            results.append((account_label, username, query_label, []))
-
+                            return (account_label, username, query_label, [])
                     except Exception as e:
                         self.notify(
                             f"Error fetching {query_label} for {account_label}: {str(e)}",
                             severity="error"
                         )
-                        results.append((account_label, username, query_label, []))
+                        return (account_label, username, query_label, [])
+
+                results = list(await asyncio.gather(
+                    *[_fetch_one_query(ql, qs) for ql, qs in queries]
+                ))
 
         except Exception as e:
             self.notify(f"Network error for {account_label}: {str(e)}", severity="error")
@@ -540,11 +540,15 @@ class PRDashboard(App):
 
         accounts = self.config.get("accounts", [])
 
-        # Fetch PRs from all accounts concurrently
+        # Fetch PRs from all accounts in parallel
+        account_result_lists = await asyncio.gather(
+            *[self.fetch_prs(account) for account in accounts],
+            return_exceptions=True,
+        )
         all_results = []
-        for account in accounts:
-            account_results = await self.fetch_prs(account)
-            all_results.extend(account_results)
+        for res in account_result_lists:
+            if not isinstance(res, Exception):
+                all_results.extend(res)
 
         # Process PRs and collect them with priority info, grouped by query label
         pr_rows_by_query = {}  # query_label -> [row_data]
@@ -591,7 +595,7 @@ class PRDashboard(App):
                     "age": age,
                     "url": pr_url,
                     "key": row_key,
-                    "checks": "⚪",  # Default, will be updated
+                    "checks": "⚪",  # Default, will be updated in phase 2
                     "pr": pr,  # Store PR object for check fetching
                     "original_query_label": query_label,  # Store for priority re-evaluation
                     "assignees": pr.get("assignees", []),  # Store for priority re-evaluation
@@ -599,12 +603,68 @@ class PRDashboard(App):
                 }
                 pr_rows_by_query[query_label].append(row_data)
 
-        # Flatten all rows for check status fetching
+        # Flatten all rows
         all_pr_rows = []
         for rows in pr_rows_by_query.values():
             all_pr_rows.extend(rows)
 
-        # Fetch check statuses concurrently for all PRs
+        # Sort PRs within each query by initial priority (before check statuses)
+        for query_label in pr_rows_by_query:
+            pr_rows_by_query[query_label].sort(key=lambda x: (x["priority"], x["age"]))
+
+        # --- Phase 1: Build and mount table immediately with placeholder checks ---
+        main_container = self.query_one("#main-container", Container)
+        await main_container.remove_children()
+
+        # Maps for live cell updates in phase 2
+        row_to_table: dict[str, DataTable] = {}
+        row_col_keys: dict[str, tuple] = {}  # row_key -> (checks_col_key, status_col_key)
+
+        total_prs = 0
+        for query_label, pr_rows in pr_rows_by_query.items():
+            if not pr_rows:
+                continue
+
+            title = Static(f"📌 {query_label} ({len(pr_rows)})", classes="query-title")
+
+            table = DataTable(cursor_type="row", zebra_stripes=True)
+            col_keys = table.add_columns(
+                "Status",
+                "Checks",
+                "Account",
+                "Type",
+                "Repo",
+                "Title",
+                "Author",
+                "Age",
+            )
+            status_col_key = col_keys[0]
+            checks_col_key = col_keys[1]
+
+            for row in pr_rows:
+                table.add_row(
+                    row["status"],
+                    row["checks"],  # "⚪" placeholder
+                    row["account"],
+                    row["state"],
+                    row["repo"],
+                    row["title"],
+                    row["author"],
+                    row["age"],
+                    key=row["key"],
+                )
+                self.pr_urls[row["key"]] = row["url"]
+                row_to_table[row["key"]] = table
+                row_col_keys[row["key"]] = (checks_col_key, status_col_key)
+                total_prs += 1
+
+            section = Vertical(title, table, classes="query-section")
+            await main_container.mount(section)
+
+        # Show PRs immediately; indicate checks are still loading
+        status_bar.update(f"📊 {total_prs} PRs | 🔄 Loading checks...")
+
+        # --- Phase 2: Fetch all check statuses in parallel, update cells live ---
         if all_pr_rows:
             # Build account credentials map
             account_creds = {}
@@ -624,29 +684,46 @@ class PRDashboard(App):
                             }
                         }
 
-            # Fetch all check statuses concurrently
             async with httpx.AsyncClient(timeout=10.0) as client:
-                for row_data in all_pr_rows:
-                    account_label = row_data["account"]
-                    if account_label in account_creds:
-                        creds = account_creds[account_label]
-                        check_status, reviewer_info = await self.get_check_status(
-                            row_data["pr"],
-                            creds["headers"],
-                            client
-                        )
-                        row_data["checks"] = check_status
-                        row_data["reviewer_info"] = reviewer_info
+                async def _fetch_check(row_data):
+                    acct_label = row_data["account"]
+                    if acct_label not in account_creds:
+                        return row_data, None, None
+                    creds = account_creds[acct_label]
+                    check_status, reviewer_info = await self.get_check_status(
+                        row_data["pr"], creds["headers"], client
+                    )
+                    return row_data, check_status, reviewer_info
 
-        # Update priority based on reviewer info and check status
+                check_results = await asyncio.gather(
+                    *[_fetch_check(rd) for rd in all_pr_rows],
+                    return_exceptions=True,
+                )
+
+            # Apply check results and update cells
+            for result in check_results:
+                if isinstance(result, Exception):
+                    continue
+                row_data, check_status, reviewer_info = result
+                if check_status is None:
+                    continue
+                row_data["checks"] = check_status
+                row_data["reviewer_info"] = reviewer_info
+                key = row_data["key"]
+                if key in row_to_table:
+                    checks_col, _ = row_col_keys[key]
+                    row_to_table[key].update_cell(key, checks_col, check_status)
+
+        # Update priority based on reviewer info and check status; patch status cells
         for row_data in all_pr_rows:
             username = row_data.get("account_username", "")
             author = row_data["author"]
             is_my_pr = author.lower() == username.lower() if username else False
 
+            old_status = row_data["status"]
+
             # Re-determine priority with reviewer info (if available)
             if "reviewer_info" in row_data:
-                # Re-evaluate priority with full reviewer information
                 priority, status = self.determine_pr_status(
                     {"user": {"login": author}, "assignees": row_data.get("assignees", [])},
                     row_data.get("original_query_label", ""),
@@ -661,6 +738,13 @@ class PRDashboard(App):
                 row_data["priority"] = Priority.HIGH
                 row_data["status"] = "🔴 Checks Failing"
 
+            # Update status cell if it changed
+            if row_data["status"] != old_status:
+                key = row_data["key"]
+                if key in row_to_table:
+                    _, status_col = row_col_keys[key]
+                    row_to_table[key].update_cell(key, status_col, row_data["status"])
+
             # Clean up temporary fields
             row_data.pop("pr", None)
             row_data.pop("account_username", None)
@@ -668,59 +752,7 @@ class PRDashboard(App):
             row_data.pop("assignees", None)
             row_data.pop("original_query_label", None)
 
-        # Sort PRs within each query by priority
-        for query_label in pr_rows_by_query:
-            pr_rows_by_query[query_label].sort(key=lambda x: (x["priority"], x["age"]))
-
-        # Clear and rebuild the main container
-        main_container = self.query_one("#main-container", Container)
-        await main_container.remove_children()
-
-        # Create a section for each query label
-        total_prs = 0
-        for query_label, pr_rows in pr_rows_by_query.items():
-            if not pr_rows:
-                continue
-
-            # Create query title
-            title = Static(f"📌 {query_label} ({len(pr_rows)})", classes="query-title")
-
-            # Create table for this query
-            table = DataTable(cursor_type="row", zebra_stripes=True)
-            table.add_columns(
-                "Status",
-                "Checks",
-                "Account",
-                "Type",
-                "Repo",
-                "Title",
-                "Author",
-                "Age",
-            )
-
-            # Add rows to table
-            for row in pr_rows:
-                table.add_row(
-                    row["status"],
-                    row["checks"],
-                    row["account"],
-                    row["state"],
-                    row["repo"],
-                    row["title"],
-                    row["author"],
-                    row["age"],
-                    key=row["key"],
-                )
-
-                # Store URL for this row
-                self.pr_urls[row["key"]] = row["url"]
-                total_prs += 1
-
-            # Create section and mount title and table together
-            section = Vertical(title, table, classes="query-section")
-            await main_container.mount(section)
-
-        # Update status bar
+        # Update final status bar
         self.last_update = datetime.now()
         status_text = f"📊 {total_prs} PRs | Last updated: {self.last_update.strftime('%H:%M:%S')}"
         status_bar.update(status_text)
