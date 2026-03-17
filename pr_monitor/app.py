@@ -47,6 +47,7 @@ class PRDashboard(App):
         margin: 1 0;
         border: solid $primary;
         padding: 0 1;
+        overflow-x: auto;
     }
 
     .query-title {
@@ -57,6 +58,7 @@ class PRDashboard(App):
 
     DataTable {
         height: auto;
+        width: auto;
         min-height: 3;
         border: none;
     }
