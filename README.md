@@ -25,14 +25,12 @@ This project uses [uv](https://github.com/astral-sh/uv) for dependency managemen
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### Option A: Install as a global tool (recommended)
+### Option A: Install directly from GitHub (recommended)
 
-Install directly from the cloned repo so `pr-monitor` is available everywhere without activating a virtualenv:
+No clone needed — install straight from the repo:
 
 ```bash
-git clone <repository-url>
-cd pr-monitor
-uv tool install .
+uv tool install git+https://github.com/cyrusxyl/pr-monitor
 ```
 
 After this, run from anywhere:
@@ -41,16 +39,30 @@ After this, run from anywhere:
 pr-monitor
 ```
 
+To upgrade to the latest version:
+
+```bash
+uv tool upgrade pr-monitor
+```
+
+### Option B: Install from a local clone
+
+```bash
+git clone https://github.com/cyrusxyl/pr-monitor
+cd pr-monitor
+uv tool install .
+```
+
 To upgrade after pulling new changes:
 
 ```bash
 uv tool install . --reinstall
 ```
 
-### Option B: Run from the repo with uv
+### Option C: Run from the repo with uv
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/cyrusxyl/pr-monitor
 cd pr-monitor
 uv sync
 uv run pr-monitor
@@ -61,7 +73,8 @@ uv run pr-monitor
 ### Step 1: Create your config file
 
 ```bash
-cp config.yaml.example config.yaml
+mkdir -p ~/.config/pr-monitor
+cp config.yaml.example ~/.config/pr-monitor/config.yaml
 ```
 
 ### Step 2: Find your API URLs
@@ -166,7 +179,9 @@ source .env
 
 ### Step 5: Configure accounts in config.yaml
 
-Edit your `config.yaml` file:
+Edit `~/.config/pr-monitor/config.yaml`. The config has two top-level sections: `accounts` (credentials + optional repo scope) and `boxes` (what to display).
+
+#### Accounts
 
 ```yaml
 accounts:
@@ -174,77 +189,48 @@ accounts:
     label: "GitHub Public"
     api_base: "https://api.github.com"
     token_env_var: "GH_PUBLIC_TOKEN"  # Must match your environment variable name
-    filters:
-      scope: "all"  # Track all repos
+    repos: []  # Empty = all repos the token can access
 
   - id: "work"
     label: "Work Enterprise"
     api_base: "https://github.your-company.com/api/v3"  # Your actual GHE domain
-    token_env_var: "GH_WORK_TOKEN"  # Must match your environment variable name
-    filters:
-      scope: "specific"  # Only track specific repos
-      repos:
-        - "organization/repo-1"
-        - "organization/repo-2"
-```
-
-**Filter Options:**
-- `scope: "all"` - Shows PRs from all repositories you have access to
-- `scope: "specific"` - Only shows PRs from the repos listed in the `repos` array
-
-### Step 6: Configure custom queries (Optional)
-
-By default, the tool shows PRs where you're requested as a reviewer. You can customize this to track different types of PRs using the `queries` configuration.
-
-#### Basic Example: Track your own PRs
-
-```yaml
-accounts:
-  - id: "personal"
-    label: "GitHub Public"
-    api_base: "https://api.github.com"
-    token_env_var: "GH_PUBLIC_TOKEN"
-    filters:
-      scope: "all"
-      queries:
-        # PRs where you're requested as a reviewer
-        - label: "Review Requested"
-          query: "is:pr is:open review-requested:@me"
-        # PRs you created
-        - label: "My PRs"
-          query: "is:pr is:open author:@me"
-```
-
-#### Advanced Example: Multiple query types
-
-```yaml
-accounts:
-  - id: "work"
-    label: "Work"
-    api_base: "https://github.company.com/api/v3"
     token_env_var: "GH_WORK_TOKEN"
-    filters:
-      scope: "specific"
-      repos:
-        - "org/important-repo"
-      queries:
-        # PRs waiting for your review
-        - label: "Review Requested"
-          query: "is:pr is:open review-requested:@me"
-        # Your PRs that need changes
-        - label: "Changes Requested"
-          query: "is:pr is:open author:@me review:changes-requested"
-        # Your approved PRs waiting to merge
-        - label: "Approved"
-          query: "is:pr is:open author:@me review:approved"
-        # PRs assigned to you
-        - label: "Assigned"
-          query: "is:pr is:open assignee:@me"
+    repos:  # Non-empty = restrict to these repos only
+      - "organization/repo-1"
+      - "organization/repo-2"
 ```
 
-#### Common Query Patterns
+**`repos` field:**
+- `repos: []` — queries all repositories the token has access to
+- `repos: [org/repo, ...]` — restricts queries to only those repositories
 
-Here are some useful query patterns you can use:
+#### Boxes
+
+Boxes are the display panels in the dashboard. Each box runs one search query against one or more accounts:
+
+```yaml
+boxes:
+  - label: "Review Requested"
+    query: "is:pr is:open review-requested:@me"
+    accounts: ["personal", "work"]  # Which account IDs to query
+
+  - label: "My PRs"
+    query: "is:pr is:open author:@me"
+    accounts: ["personal", "work"]
+
+  - label: "Recently Closed"
+    query: "is:pr is:closed author:@me"
+    closed_since_days: 14  # Appends "closed:>YYYY-MM-DD" to the query
+    accounts: ["personal", "work"]
+```
+
+**Box fields:**
+- `label` — display name shown in the dashboard header
+- `query` — GitHub search query string
+- `accounts` — list of account IDs to run this query against; omit to run against all accounts
+- `closed_since_days` — optional; limits closed PR results to the last N days
+
+### Step 6: Common query patterns
 
 | Use Case | Query |
 |----------|-------|
@@ -259,8 +245,6 @@ Here are some useful query patterns you can use:
 | PRs from a specific user | `is:pr is:open author:username` |
 | PRs needing any review | `is:pr is:open review:none` |
 | Combine conditions with OR | `is:pr is:open (review-requested:@me OR assignee:@me)` |
-
-**Note**: The `scope` filter (all/specific repos) applies to all queries within an account.
 
 For complete GitHub search syntax, see: [GitHub Search Documentation](https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests)
 
@@ -332,8 +316,8 @@ The status bar at the bottom shows:
 ## Troubleshooting
 
 ### "config.yaml not found!"
-- Make sure you've copied `config.yaml.example` to `config.yaml`
-- Check that you're running the command from the project directory
+- Make sure you've copied the example config: `mkdir -p ~/.config/pr-monitor && cp config.yaml.example ~/.config/pr-monitor/config.yaml`
+- The config must be at `~/.config/pr-monitor/config.yaml` (respects `$XDG_CONFIG_HOME` if set)
 
 ### "Token not found in environment variable"
 - Verify your environment variables are set: `echo $GH_PUBLIC_TOKEN`
@@ -391,27 +375,22 @@ general:
 
 ### Monitor multiple PR types simultaneously
 
-You can add multiple queries per account to see different types of PRs side-by-side:
+Add multiple boxes to see different types of PRs side-by-side:
 
 ```yaml
-accounts:
-  - id: "work"
-    label: "Work"
-    api_base: "https://github.company.com/api/v3"
-    token_env_var: "GH_WORK_TOKEN"
-    filters:
-      scope: "all"
-      queries:
-        # All three will be displayed together in the dashboard
-        - label: "Review Requested"
-          query: "is:pr is:open review-requested:@me"
-        - label: "My PRs"
-          query: "is:pr is:open author:@me"
-        - label: "Mentioned"
-          query: "is:pr is:open mentions:@me"
+boxes:
+  - label: "Review Requested"
+    query: "is:pr is:open review-requested:@me"
+    accounts: ["work"]
+  - label: "My PRs"
+    query: "is:pr is:open author:@me"
+    accounts: ["work"]
+  - label: "Mentioned"
+    query: "is:pr is:open mentions:@me"
+    accounts: ["work"]
 ```
 
-See [Step 6: Configure custom queries](#step-6-configure-custom-queries-optional) for more query examples.
+See [Step 6: Common query patterns](#step-6-common-query-patterns) for more query examples.
 
 ## Development
 
@@ -430,10 +409,9 @@ pr-monitor/
 ├── pr_monitor/
 │   ├── __init__.py
 │   └── app.py           # Main application
-├── config.yaml.example  # Example configuration
-├── config.yaml         # Your configuration (not in git)
-├── pyproject.toml      # Project dependencies
-└── README.md           # This file
+├── config.yaml.example  # Example configuration (copy to ~/.config/pr-monitor/config.yaml)
+├── pyproject.toml       # Project dependencies
+└── README.md            # This file
 ```
 
 ## Security Notes

@@ -31,8 +31,9 @@ Two-phase load to show PRs before checks finish:
 | Method | Purpose |
 |---|---|
 | `load_config()` | Reads `~/.config/pr-monitor/config.yaml` (XDG-aware) |
-| `build_queries()` | Converts account config into `(label, query_string)` pairs |
-| `fetch_prs(account)` | Hits `/search/issues` for all queries concurrently |
+| `build_query_for_box(box, account)` | Builds GitHub Search query string from a box + account combination |
+| `_resolve_box_accounts(box, accounts_by_id)` | Returns accounts to query for a given box (all accounts if `box["accounts"]` omitted) |
+| `fetch_prs(box, account)` | Hits `/search/issues` for one box+account pair |
 | `get_check_status(pr, headers, client)` | Hits Check Runs API then falls back to Commit Status API; also collects reviewer info |
 | `determine_pr_status(pr, query_label, username, reviewer_info)` | Pure logic — returns `(Priority, status_string)` |
 | `get_authenticated_user()` | Cached by `token_env_var`; hits `/user` once per token |
@@ -47,15 +48,19 @@ accounts:
     label: "Display Name"
     api_base: "https://api.github.com"   # override for GHE
     token_env_var: "GH_TOKEN"            # PAT stored in env, not config
-    filters:
-      scope: "all"          # or "specific" (requires repos[])
-      repos: []
-      queries:
-        - label: "Review Requested"
-          query: "is:pr is:open review-requested:@me"
+    repos: []                            # empty = all repos; list = restrict to these
+boxes:
+  - label: "Review Requested"
+    query: "is:pr is:open review-requested:@me"
+    accounts: ["personal"]              # omit to run against all accounts
+    closed_since_days: 14              # optional; appends closed:>DATE to query
 ```
 
 Authentication is always via env vars; the config file never holds tokens.
+
+## README maintenance
+
+**When to update `README.md`**: update it whenever you change config schema fields, add/remove features visible to users (keyboard shortcuts, columns, status indicators), or change install/setup steps. The README is the user-facing source of truth for configuration — keep `config.yaml.example` and README in sync.
 
 ### UI structure
 
